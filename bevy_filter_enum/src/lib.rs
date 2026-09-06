@@ -8,16 +8,28 @@ pub trait EnumFilterValue {
     /// Returns the generated marker index for this enum value.
     fn marker_index(&self) -> usize;
 
-    /// Inserts the marker component corresponding to a generated marker index.
-    fn insert_marker_by_index(index: usize, entity: &mut bevy_ecs::system::EntityCommands<'_>);
+    /// Brings the generated marker components in line with `active`: the
+    /// marker for every index `active` accepts is added if missing, and every
+    /// other marker is removed if present.
+    ///
+    /// Markers already in the right state are left untouched, so `Add` and
+    /// `Remove` hooks and observers fire only on real variant transitions and
+    /// not when the enum is re-inserted with the same variant.
+    fn sync_markers(
+        active: impl Fn(usize) -> bool,
+        entity: &mut bevy_ecs::system::EntityCommands<'_>,
+    );
 
-    /// Inserts the marker component corresponding to this enum value.
-    fn insert_marker(&self, entity: &mut bevy_ecs::system::EntityCommands<'_>) {
-        Self::insert_marker_by_index(self.marker_index(), entity);
+    /// Syncs the markers so that only the one for this enum value is present.
+    fn sync_marker(&self, entity: &mut bevy_ecs::system::EntityCommands<'_>) {
+        let index = self.marker_index();
+        Self::sync_markers(|candidate| candidate == index, entity);
     }
 
     /// Removes all marker components generated for this enum type.
-    fn remove_markers(entity: &mut bevy_ecs::system::EntityCommands<'_>);
+    fn remove_markers(entity: &mut bevy_ecs::system::EntityCommands<'_>) {
+        Self::sync_markers(|_| false, entity);
+    }
 }
 
 /// Re-exports so the derive output can refer to known crate paths.
@@ -29,10 +41,41 @@ pub mod __private {
 #[cfg(test)]
 mod tests {
     use bevy_app::App;
-    use bevy_ecs::prelude::Component;
+    use bevy_ecs::lifecycle::{Add, Discard, Insert, Remove};
+    use bevy_ecs::prelude::{Component, On, ResMut, Resource};
     use strum_macros::Display;
 
     use crate::{EnumFilter, EnumFilterCollection};
+
+    /// Counts of every lifecycle event observed for one component type.
+    #[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
+    struct Transitions {
+        add: usize,
+        insert: usize,
+        discard: usize,
+        remove: usize,
+    }
+
+    /// Tallies `Add`, `Insert`, `Discard` and `Remove` for `C` into
+    /// [`Transitions`], so tests can assert exactly which transitions a
+    /// marker or extracted payload went through.
+    fn observe_transitions<C: Component>(app: &mut App) {
+        app.init_resource::<Transitions>();
+        app.add_observer(|_: On<Add, C>, mut counts: ResMut<Transitions>| counts.add += 1);
+        app.add_observer(|_: On<Insert, C>, mut counts: ResMut<Transitions>| {
+            counts.insert += 1;
+        });
+        app.add_observer(|_: On<Discard, C>, mut counts: ResMut<Transitions>| {
+            counts.discard += 1;
+        });
+        app.add_observer(|_: On<Remove, C>, mut counts: ResMut<Transitions>| {
+            counts.remove += 1;
+        });
+    }
+
+    fn transitions(app: &App) -> Transitions {
+        app.world().resource::<Transitions>().clone()
+    }
 
     #[derive(Component, EnumFilter, Debug, PartialEq, Eq)]
     enum Mode {
@@ -63,6 +106,72 @@ mod tests {
 
         assert!(!entity_ref.contains::<ModeIdle>());
         assert!(!entity_ref.contains::<ModeRun>());
+    }
+
+    #[test]
+    fn reinserting_same_variant_leaves_marker_untouched() {
+        let mut app = App::new();
+        app.add_plugins(ModeEnumFilterPlugin);
+        observe_transitions::<ModeIdle>(&mut app);
+
+        let entity = app.world_mut().spawn(Mode::Idle).id();
+        let after_spawn = Transitions {
+            add: 1,
+            insert: 1,
+            discard: 0,
+            remove: 0,
+        };
+        assert_eq!(transitions(&app), after_spawn);
+
+        app.world_mut().entity_mut(entity).insert(Mode::Idle);
+        assert_eq!(
+            transitions(&app),
+            after_spawn,
+            "same variant re-inserted through the hook must not churn the marker",
+        );
+
+        *app.world_mut()
+            .get_mut::<Mode>(entity)
+            .expect("mode should exist") = Mode::Idle;
+        app.update();
+        assert_eq!(
+            transitions(&app),
+            after_spawn,
+            "same variant re-synced by the Changed system must not churn the marker",
+        );
+        assert!(app.world().entity(entity).contains::<ModeIdle>());
+    }
+
+    #[test]
+    fn variant_change_fires_remove_then_add() {
+        let mut app = App::new();
+        app.add_plugins(ModeEnumFilterPlugin);
+        observe_transitions::<ModeRun>(&mut app);
+
+        let entity = app.world_mut().spawn(Mode::Idle).id();
+        assert_eq!(transitions(&app), Transitions::default());
+
+        app.world_mut().entity_mut(entity).insert(Mode::Run);
+        assert_eq!(
+            transitions(&app),
+            Transitions {
+                add: 1,
+                insert: 1,
+                discard: 0,
+                remove: 0,
+            }
+        );
+
+        app.world_mut().entity_mut(entity).insert(Mode::Idle);
+        assert_eq!(
+            transitions(&app),
+            Transitions {
+                add: 1,
+                insert: 1,
+                discard: 1,
+                remove: 1,
+            }
+        );
     }
 
     #[test]
@@ -203,6 +312,44 @@ mod tests {
     }
 
     #[test]
+    fn collection_reinsert_keeps_retained_markers_untouched() {
+        let mut app = App::new();
+        app.add_plugins(FruitBasketEnumFilterPlugin);
+        observe_transitions::<FruitApple>(&mut app);
+
+        let entity = app
+            .world_mut()
+            .spawn(FruitBasket {
+                fruits: vec![FruitEntry { kind: Fruit::Apple }],
+            })
+            .id();
+        let after_spawn = Transitions {
+            add: 1,
+            insert: 1,
+            discard: 0,
+            remove: 0,
+        };
+        assert_eq!(transitions(&app), after_spawn);
+
+        app.world_mut().entity_mut(entity).insert(FruitBasket {
+            fruits: vec![
+                FruitEntry { kind: Fruit::Apple },
+                FruitEntry {
+                    kind: Fruit::Banana,
+                },
+            ],
+        });
+        assert_eq!(
+            transitions(&app),
+            after_spawn,
+            "a marker kept across a collection update must not churn",
+        );
+        let entity_ref = app.world().entity(entity);
+        assert!(entity_ref.contains::<FruitApple>());
+        assert!(entity_ref.contains::<FruitBanana>());
+    }
+
+    #[test]
     fn collection_markers_are_synced_on_change() {
         let mut app = App::new();
         app.add_plugins(FruitBasketEnumFilterPlugin);
@@ -293,6 +440,45 @@ mod tests {
         assert_eq!(
             entity_ref.get::<DownloadProgress>(),
             Some(&DownloadProgress { percent: 40 })
+        );
+    }
+
+    #[test]
+    fn extracted_payload_update_replaces_without_readding() {
+        let mut app = App::new();
+        app.add_plugins(DownloadEnumFilterPlugin);
+        observe_transitions::<DownloadProgress>(&mut app);
+
+        let entity = app
+            .world_mut()
+            .spawn(Download::Active(DownloadProgress { percent: 40 }))
+            .id();
+        assert_eq!(
+            transitions(&app),
+            Transitions {
+                add: 1,
+                insert: 1,
+                discard: 0,
+                remove: 0,
+            }
+        );
+
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(Download::Active(DownloadProgress { percent: 80 }));
+        assert_eq!(
+            transitions(&app),
+            Transitions {
+                add: 1,
+                insert: 2,
+                discard: 1,
+                remove: 0,
+            },
+            "a payload update within the same variant is a replace, not a remove and add",
+        );
+        assert_eq!(
+            app.world().entity(entity).get::<DownloadProgress>(),
+            Some(&DownloadProgress { percent: 80 })
         );
     }
 

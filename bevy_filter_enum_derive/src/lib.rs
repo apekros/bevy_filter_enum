@@ -141,34 +141,61 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
         });
     }
 
-    let (remove_payloads_hook, remove_payloads_system, system_payload_sync) =
-        if unique_payload_types.is_empty() {
-            (quote! {}, quote! {}, quote! {})
-        } else {
-            let system_payload_arms =
-                variant_patterns.iter().enumerate().map(|(index, pattern)| {
-                    match &extract_types[index] {
-                        Some(_) => {
-                            let variant_ident = &variant_idents[index];
-                            quote! {
-                                #enum_ident::#variant_ident(payload) => {
-                                    ec.insert(::core::clone::Clone::clone(payload));
-                                }
-                            }
+    // Payload projections are synced by removing the payload types the active
+    // variant does not carry and (re)inserting the active variant's payload. A
+    // payload whose variant stays active is replaced in place, so it reports
+    // `Discard` and `Insert` rather than a spurious `Remove` and `Add`.
+    let (remove_stale_payloads, remove_all_payloads, system_payload_sync) = if unique_payload_types
+        .is_empty()
+    {
+        (quote! {}, quote! {}, quote! {})
+    } else {
+        let system_payload_arms = variant_patterns.iter().enumerate().map(|(index, pattern)| {
+            match &extract_types[index] {
+                Some(_) => {
+                    let variant_ident = &variant_idents[index];
+                    quote! {
+                        #enum_ident::#variant_ident(payload) => {
+                            ec.insert(::core::clone::Clone::clone(payload));
                         }
-                        None => quote! { #pattern => {} },
                     }
-                });
-            (
-                quote! { entity_commands.remove::<(#(#unique_payload_types,)*)>(); },
-                quote! { ec.remove::<(#(#unique_payload_types,)*)>(); },
+                }
+                None => quote! { #pattern => {} },
+            }
+        });
+        // For each payload type, the indexes of the variants carrying it.
+        // Expects `variant_index` and `ec` in scope.
+        let stale_payload_removals: Vec<_> = unique_payload_types
+            .iter()
+            .map(|payload_type| {
+                let payload_token = quote!(#payload_type).to_string();
+                let carrying_indexes: Vec<_> = extract_types
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, extract_type)| {
+                        extract_type
+                            .as_ref()
+                            .is_some_and(|ty| quote!(#ty).to_string() == payload_token)
+                    })
+                    .map(|(index, _)| index)
+                    .collect();
                 quote! {
-                    match value {
-                        #(#system_payload_arms)*
+                    if !::core::matches!(variant_index, #(#carrying_indexes)|*) {
+                        ec.remove::<#payload_type>();
                     }
-                },
-            )
-        };
+                }
+            })
+            .collect();
+        (
+            quote! { #(#stale_payload_removals)* },
+            quote! { ec.remove::<(#(#unique_payload_types,)*)>(); },
+            quote! {
+                match value {
+                    #(#system_payload_arms)*
+                }
+            },
+        )
+    };
 
     let marker_docs: Vec<_> = variant_idents
         .iter()
@@ -195,24 +222,17 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
                 }
             }
 
-            fn insert_marker_by_index(
-                index: usize,
+            fn sync_markers(
+                active: impl Fn(usize) -> bool,
                 entity: &mut ::bevy_filter_enum::__private::bevy_ecs::system::EntityCommands<'_>,
             ) {
-                match index {
-                    #(
-                        #variant_indexes => {
-                            entity.insert(#marker_idents);
-                        }
-                    )*
-                    _ => {}
-                }
-            }
-
-            fn remove_markers(
-                entity: &mut ::bevy_filter_enum::__private::bevy_ecs::system::EntityCommands<'_>,
-            ) {
-                entity.remove::<(#(#marker_idents,)*)>();
+                #(
+                    if active(#variant_indexes) {
+                        entity.insert_if_new(#marker_idents);
+                    } else {
+                        entity.remove::<#marker_idents>();
+                    }
+                )*
             }
         }
 
@@ -255,25 +275,18 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
             let ::core::option::Option::Some(value) = world.get::<#enum_ident>(context.entity) else {
                 return;
             };
-            let variant_index = match value {
-                #(
-                    #variant_patterns => #variant_indexes,
-                )*
-            };
+            let variant_index = ::bevy_filter_enum::EnumFilterValue::marker_index(value);
             #(#hook_payload_lets)*
 
             let mut commands = world.commands();
             let mut entity_commands = commands.entity(context.entity);
-            <#enum_ident as ::bevy_filter_enum::EnumFilterValue>::remove_markers(&mut entity_commands);
-            #remove_payloads_hook
-
-            match variant_index {
-                #(
-                    #variant_indexes => {
-                        entity_commands.insert(#marker_idents);
-                    }
-                )*
-                _ => {}
+            <#enum_ident as ::bevy_filter_enum::EnumFilterValue>::sync_markers(
+                |index| index == variant_index,
+                &mut entity_commands,
+            );
+            {
+                let ec = &mut entity_commands;
+                #remove_stale_payloads
             }
             #(#hook_payload_inserts)*
         }
@@ -283,9 +296,9 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
             context: ::bevy_filter_enum::__private::bevy_ecs::lifecycle::HookContext,
         ) {
             let mut commands = world.commands();
-            let mut entity_commands = commands.entity(context.entity);
-            <#enum_ident as ::bevy_filter_enum::EnumFilterValue>::remove_markers(&mut entity_commands);
-            #remove_payloads_hook
+            let mut ec = commands.entity(context.entity);
+            <#enum_ident as ::bevy_filter_enum::EnumFilterValue>::remove_markers(&mut ec);
+            #remove_all_payloads
         }
 
         fn #sync_fn_ident(
@@ -302,10 +315,16 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
             >,
         ) {
             for (entity, value) in &q {
+                let variant_index = ::bevy_filter_enum::EnumFilterValue::marker_index(value);
                 let mut ec = commands.entity(entity);
-                <#enum_ident as ::bevy_filter_enum::EnumFilterValue>::remove_markers(&mut ec);
-                #remove_payloads_system
-                ::bevy_filter_enum::EnumFilterValue::insert_marker(value, &mut ec);
+                <#enum_ident as ::bevy_filter_enum::EnumFilterValue>::sync_markers(
+                    |index| index == variant_index,
+                    &mut ec,
+                );
+                {
+                    let ec = &mut ec;
+                    #remove_stale_payloads
+                }
                 #system_payload_sync
             }
         }
@@ -317,7 +336,7 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
             for entity in removed.read() {
                 let mut ec = commands.entity(entity);
                 <#enum_ident as ::bevy_filter_enum::EnumFilterValue>::remove_markers(&mut ec);
-                #remove_payloads_system
+                #remove_all_payloads
             }
         }
     };
@@ -487,10 +506,10 @@ pub fn derive_enum_filter_collection(input: TokenStream) -> TokenStream {
 
             let mut commands = world.commands();
             let mut entity_commands = commands.entity(context.entity);
-            <#enum_path as ::bevy_filter_enum::EnumFilterValue>::remove_markers(&mut entity_commands);
-            for marker_index in marker_indexes {
-                <#enum_path as ::bevy_filter_enum::EnumFilterValue>::insert_marker_by_index(marker_index, &mut entity_commands);
-            }
+            <#enum_path as ::bevy_filter_enum::EnumFilterValue>::sync_markers(
+                |index| marker_indexes.contains(&index),
+                &mut entity_commands,
+            );
         }
 
         fn #hook_cleanup_fn_ident(
@@ -516,11 +535,16 @@ pub fn derive_enum_filter_collection(input: TokenStream) -> TokenStream {
             >,
         ) {
             for (entity, collection) in &q {
+                let marker_indexes: ::std::vec::Vec<usize> = collection
+                    .#iter_field
+                    .iter()
+                    .map(|item| ::bevy_filter_enum::EnumFilterValue::marker_index(#marker_value))
+                    .collect();
                 let mut ec = commands.entity(entity);
-                <#enum_path as ::bevy_filter_enum::EnumFilterValue>::remove_markers(&mut ec);
-                for item in &collection.#iter_field {
-                    ::bevy_filter_enum::EnumFilterValue::insert_marker(#marker_value, &mut ec);
-                }
+                <#enum_path as ::bevy_filter_enum::EnumFilterValue>::sync_markers(
+                    |index| marker_indexes.contains(&index),
+                    &mut ec,
+                );
             }
         }
 
