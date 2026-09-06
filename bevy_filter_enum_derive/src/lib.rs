@@ -102,6 +102,22 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
 
     let variant_indexes: Vec<_> = (0..variant_idents.len()).collect::<Vec<_>>();
 
+    // For each variant, a bundle of every other marker so the inactive set
+    // goes away in a single remove command.
+    let inactive_marker_bundles: Vec<_> = (0..marker_idents.len())
+        .map(|active| {
+            let others: Vec<_> = marker_idents
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != active)
+                .map(|(_, ident)| quote!(#ident))
+                .collect();
+            bundle_tuple(&others)
+        })
+        .collect();
+    let all_markers: Vec<_> = marker_idents.iter().map(|ident| quote!(#ident)).collect();
+    let all_marker_bundle = bundle_tuple(&all_markers);
+
     let mut unique_payload_types: Vec<syn::Type> = Vec::new();
     let mut seen_payload_types: Vec<String> = Vec::new();
     for payload_type in extract_types.iter().flatten() {
@@ -186,9 +202,15 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
                 }
             })
             .collect();
+        let payload_bundle = bundle_tuple(
+            &unique_payload_types
+                .iter()
+                .map(|ty| quote!(#ty))
+                .collect::<Vec<_>>(),
+        );
         (
             quote! { #(#stale_payload_removals)* },
-            quote! { ec.remove::<(#(#unique_payload_types,)*)>(); },
+            quote! { ec.remove::<#payload_bundle>(); },
             quote! {
                 match value {
                     #(#system_payload_arms)*
@@ -222,6 +244,21 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
                 }
             }
 
+            fn sync_marker_at(
+                index: usize,
+                entity: &mut ::bevy_filter_enum::__private::bevy_ecs::system::EntityCommands<'_>,
+            ) {
+                match index {
+                    #(
+                        #variant_indexes => {
+                            entity.insert_if_new(#marker_idents);
+                            entity.remove::<#inactive_marker_bundles>();
+                        }
+                    )*
+                    _ => {}
+                }
+            }
+
             fn sync_markers(
                 active: impl Fn(usize) -> bool,
                 entity: &mut ::bevy_filter_enum::__private::bevy_ecs::system::EntityCommands<'_>,
@@ -234,6 +271,12 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
                     }
                 )*
             }
+
+            fn remove_markers(
+                entity: &mut ::bevy_filter_enum::__private::bevy_ecs::system::EntityCommands<'_>,
+            ) {
+                entity.remove::<#all_marker_bundle>();
+            }
         }
 
         #[doc = #plugin_doc]
@@ -241,13 +284,12 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
 
         impl ::bevy_filter_enum::__private::bevy_app::Plugin for #plugin_ident {
             fn build(&self, app: &mut ::bevy_filter_enum::__private::bevy_app::App) {
+                use ::bevy_filter_enum::__private::bevy_ecs::schedule::IntoScheduleConfigs as _;
+
                 #register_hooks_fn_ident(app.world_mut());
                 app.add_systems(
                     ::bevy_filter_enum::__private::bevy_app::PreUpdate,
-                    (
-                        #sync_fn_ident,
-                        #cleanup_fn_ident,
-                    ),
+                    (#sync_fn_ident, #cleanup_fn_ident).in_set(::bevy_filter_enum::EnumFilterSystems),
                 );
             }
         }
@@ -280,8 +322,8 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
 
             let mut commands = world.commands();
             let mut entity_commands = commands.entity(context.entity);
-            <#enum_ident as ::bevy_filter_enum::EnumFilterValue>::sync_markers(
-                |index| index == variant_index,
+            <#enum_ident as ::bevy_filter_enum::EnumFilterValue>::sync_marker_at(
+                variant_index,
                 &mut entity_commands,
             );
             {
@@ -308,17 +350,14 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
                     ::bevy_filter_enum::__private::bevy_ecs::prelude::Entity,
                     &#enum_ident
                 ),
-                ::bevy_filter_enum::__private::bevy_ecs::prelude::Or<(
-                    ::bevy_filter_enum::__private::bevy_ecs::prelude::Added<#enum_ident>,
-                    ::bevy_filter_enum::__private::bevy_ecs::prelude::Changed<#enum_ident>,
-                )>
+                ::bevy_filter_enum::__private::bevy_ecs::prelude::Changed<#enum_ident>,
             >,
         ) {
             for (entity, value) in &q {
                 let variant_index = ::bevy_filter_enum::EnumFilterValue::marker_index(value);
                 let mut ec = commands.entity(entity);
-                <#enum_ident as ::bevy_filter_enum::EnumFilterValue>::sync_markers(
-                    |index| index == variant_index,
+                <#enum_ident as ::bevy_filter_enum::EnumFilterValue>::sync_marker_at(
+                    variant_index,
                     &mut ec,
                 );
                 {
@@ -342,6 +381,20 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+/// Bevy only implements `Bundle` for tuples of up to 15 elements, so larger
+/// sets are nested into tuples of tuples.
+fn bundle_tuple(types: &[TokenStream2]) -> TokenStream2 {
+    const MAX_TUPLE_LEN: usize = 15;
+    if types.len() <= MAX_TUPLE_LEN {
+        return quote!((#(#types,)*));
+    }
+    let chunks: Vec<_> = types
+        .chunks(MAX_TUPLE_LEN)
+        .map(|chunk| quote!((#(#chunk,)*)))
+        .collect();
+    bundle_tuple(&chunks)
 }
 
 /// Returns the payload type for variants opting into payload extraction via
@@ -464,13 +517,12 @@ pub fn derive_enum_filter_collection(input: TokenStream) -> TokenStream {
 
         impl ::bevy_filter_enum::__private::bevy_app::Plugin for #plugin_ident {
             fn build(&self, app: &mut ::bevy_filter_enum::__private::bevy_app::App) {
+                use ::bevy_filter_enum::__private::bevy_ecs::schedule::IntoScheduleConfigs as _;
+
                 #register_hooks_fn_ident(app.world_mut());
                 app.add_systems(
                     ::bevy_filter_enum::__private::bevy_app::PreUpdate,
-                    (
-                        #sync_fn_ident,
-                        #cleanup_fn_ident,
-                    ),
+                    (#sync_fn_ident, #cleanup_fn_ident).in_set(::bevy_filter_enum::EnumFilterSystems),
                 );
             }
         }
@@ -528,10 +580,7 @@ pub fn derive_enum_filter_collection(input: TokenStream) -> TokenStream {
                     ::bevy_filter_enum::__private::bevy_ecs::prelude::Entity,
                     &#component_ident
                 ),
-                ::bevy_filter_enum::__private::bevy_ecs::prelude::Or<(
-                    ::bevy_filter_enum::__private::bevy_ecs::prelude::Added<#component_ident>,
-                    ::bevy_filter_enum::__private::bevy_ecs::prelude::Changed<#component_ident>,
-                )>
+                ::bevy_filter_enum::__private::bevy_ecs::prelude::Changed<#component_ident>,
             >,
         ) {
             for (entity, collection) in &q {
