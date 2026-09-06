@@ -60,7 +60,9 @@ pub mod __private {
 mod tests {
     use bevy_app::{App, PreUpdate};
     use bevy_ecs::lifecycle::{Add, Discard, Insert, Remove};
-    use bevy_ecs::prelude::{Component, IntoScheduleConfigs, On, Query, ResMut, Resource, With};
+    use bevy_ecs::prelude::{
+        Commands, Component, IntoScheduleConfigs, On, Query, ResMut, Resource, With,
+    };
     use strum_macros::Display;
 
     use crate::{EnumFilter, EnumFilterCollection, EnumFilterSystems};
@@ -566,6 +568,25 @@ mod tests {
             app.world().entity(entity).get::<DownloadProgress>(),
             Some(&DownloadProgress { percent: 80 })
         );
+    }
+
+    #[test]
+    fn despawning_from_a_marker_observer_does_not_panic() {
+        let mut app = App::new();
+        app.add_plugins(DownloadEnumFilterPlugin);
+        // The marker lands before the extracted payload does. An observer
+        // reacting to the marker by despawning the entity must not make the
+        // trailing payload insert blow up on the corpse.
+        app.add_observer(|add: On<Add, DownloadActive>, mut commands: Commands| {
+            commands.entity(add.entity).despawn();
+        });
+
+        let entity = app.world_mut().spawn(Download::Queued).id();
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(Download::Active(DownloadProgress { percent: 40 }));
+
+        assert!(app.world().get_entity(entity).is_err());
     }
 
     #[test]

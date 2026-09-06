@@ -152,7 +152,7 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
         });
         hook_payload_inserts.push(quote! {
             if let ::core::option::Option::Some(payload) = #payload_var {
-                entity_commands.insert(payload);
+                entity_commands.try_insert(payload);
             }
         });
     }
@@ -172,7 +172,7 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
                     let variant_ident = &variant_idents[index];
                     quote! {
                         #enum_ident::#variant_ident(payload) => {
-                            ec.insert(::core::clone::Clone::clone(payload));
+                            ec.try_insert(::core::clone::Clone::clone(payload));
                         }
                     }
                 }
@@ -197,7 +197,7 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
                     .collect();
                 quote! {
                     if !::core::matches!(variant_index, #(#carrying_indexes)|*) {
-                        ec.remove::<#payload_type>();
+                        ec.try_remove::<#payload_type>();
                     }
                 }
             })
@@ -210,7 +210,7 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
         );
         (
             quote! { #(#stale_payload_removals)* },
-            quote! { ec.remove::<#payload_bundle>(); },
+            quote! { ec.try_remove::<#payload_bundle>(); },
             quote! {
                 match value {
                     #(#system_payload_arms)*
@@ -251,8 +251,8 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
                 match index {
                     #(
                         #variant_indexes => {
-                            entity.insert_if_new(#marker_idents);
-                            entity.remove::<#inactive_marker_bundles>();
+                            entity.try_insert_if_new(#marker_idents);
+                            entity.try_remove::<#inactive_marker_bundles>();
                         }
                     )*
                     _ => {}
@@ -265,9 +265,9 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
             ) {
                 #(
                     if active(#variant_indexes) {
-                        entity.insert_if_new(#marker_idents);
+                        entity.try_insert_if_new(#marker_idents);
                     } else {
-                        entity.remove::<#marker_idents>();
+                        entity.try_remove::<#marker_idents>();
                     }
                 )*
             }
@@ -275,7 +275,7 @@ pub fn derive_enum_filter(input: TokenStream) -> TokenStream {
             fn remove_markers(
                 entity: &mut ::bevy_filter_enum::__private::bevy_ecs::system::EntityCommands<'_>,
             ) {
-                entity.remove::<#all_marker_bundle>();
+                entity.try_remove::<#all_marker_bundle>();
             }
         }
 

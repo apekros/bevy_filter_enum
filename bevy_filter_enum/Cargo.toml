@@ -1,6 +1,6 @@
 [package]
 name = "bevy_filter_enum"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/apekros/bevy_filter_enum"
@@ -9,7 +9,7 @@ description = "Derive marker components from enum variants for Bevy ECS queries"
 [dependencies]
 bevy_app = "0.19"
 bevy_ecs = "0.19"
-bevy_filter_enum_derive = { version = "0.5.2", path = "../bevy_filter_enum_derive" }
+bevy_filter_enum_derive = { version = "0.5.3", path = "../bevy_filter_enum_derive" }
 
 [dev-dependencies]
 strum_macros = "0.28"
