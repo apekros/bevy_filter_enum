@@ -3,6 +3,7 @@ name = "bevy_filter_enum_derive"
 version = "0.5.2"
 edition = "2021"
 license = "MIT"
+repository = "https://github.com/apekros/bevy_filter_enum"
 description = "Derive macro for bevy_filter_enum"
 
 [lib]
