@@ -1,0 +1,21 @@
+[package]
+name = "bevy_filter_enum"
+description = "Query Bevy entities by enum variant with generated marker components"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["bevy", "ecs", "enum", "filter", "marker"]
+categories = ["game-development"]
+
+[dependencies]
+bevy_app.workspace = true
+bevy_ecs.workspace = true
+bevy_filter_enum_derive.workspace = true
+
+[dev-dependencies]
+anyhow = "1"
+
+[lints]
+workspace = true

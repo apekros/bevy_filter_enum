@@ -1,0 +1,46 @@
+[workspace]
+resolver = "3"
+members = ["bevy_filter_enum", "bevy_filter_enum_derive"]
+
+[workspace.package]
+version = "0.6.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/apekros/bevy_filter_enum"
+
+[workspace.dependencies]
+bevy_app = { version = "0.20", default-features = false, features = ["std"] }
+bevy_ecs = { version = "0.20", default-features = false, features = ["std"] }
+bevy_filter_enum_derive = { version = "0.6.0", path = "bevy_filter_enum_derive" }
+proc-macro2 = "1"
+quote = "1"
+# Bevy's own macros are on syn 2, sharing it keeps one syn in downstream builds.
+syn = "2"
+
+# Mirrors the lint set of the bevy workspace (bevy 0.20.1 Cargo.toml), plus
+# hard bans on panicking shortcuts.
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+doc_markdown = "warn"
+manual_let_else = "warn"
+match_same_arms = "warn"
+redundant_closure_for_method_calls = "warn"
+redundant_else = "warn"
+semicolon_if_nothing_returned = "warn"
+unwrap_or_default = "warn"
+nonstandard_macro_braces = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+std_instead_of_alloc = "warn"
+alloc_instead_of_core = "warn"
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+map_unwrap_or = "warn"
